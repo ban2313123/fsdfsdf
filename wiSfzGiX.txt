@@ -1,0 +1,309 @@
+local component = require("component")
+local event = require("event")
+local gpu = component.gpu
+local computer = require("computer")
+
+-- Поиск ME Interface с проверкой через assert
+local me_interface = assert(
+    component.proxy(component.list("me_interface")()),
+    "ME Interface не найден! Подключите адаптер к ME Interface."
+)
+
+-- Настройки цветов
+local colors = {
+    background = 0x000000,
+    text = 0xFFFFFF,
+    header = 0x3366FF,
+    craftable = 0x55FF55,
+    storage = 0xFFAA00,
+    detail = 0x4444FF,
+    button = 0x555555,
+    error = 0xFF0000,
+    warning = 0xFFFF00
+}
+
+-- Установка разрешения экрана
+local w, h = gpu.getResolution()
+assert(w >= 80 and h >= 25, "Требуется экран минимум 80x25 символов")
+
+-- Очистка экрана
+local function clear()
+    gpu.setBackground(colors.background)
+    gpu.fill(1, 1, w, h, " ")
+end
+
+-- Рисование кнопки с проверкой параметров
+local function drawButton(x, y, width, text, color)
+    assert(type(x) == "number" and type(y) == "number", "Неверные координаты кнопки")
+    assert(type(width) == "number" and width >= #text, "Ширина кнопки слишком мала")
+    
+    color = color or colors.button
+    gpu.setBackground(color)
+    gpu.fill(x, y, width, 1, " ")
+    gpu.setForeground(colors.text)
+    gpu.set(x + math.floor((width - #text)/2), y, text)
+    return {x = x, y = y, width = width, height = 1}
+end
+
+-- Безопасное получение информации о хранилище
+local function getStorageInfo()
+    local ok, items = pcall(function() 
+        return assert(me_interface.getItemsInNetwork(), "Нет данных о предметах")
+    end)
+    
+    if not ok then
+        return {
+            error = items,
+            totalCells = 0,
+            usedCells = 0,
+            totalItems = 0,
+            uniqueItems = 0
+        }
+    end
+
+    local totalCells, usedCells = 0, 0
+    local itemsCount = {}
+    local totalItems = 0
+
+    for _, item in pairs(items) do
+        if item.name:match("storage_cell") then
+            totalCells = totalCells + 1
+            if item.damage > 0 then
+                usedCells = usedCells + 1
+            end
+        else
+            local key = item.label or item.name
+            itemsCount[key] = (itemsCount[key] or 0) + (item.size or 1)
+            totalItems = totalItems + (item.size or 1)
+        end
+    end
+
+    return {
+        totalCells = totalCells,
+        usedCells = usedCells,
+        totalItems = totalItems,
+        uniqueItems = tableCount(itemsCount),
+        items = items
+    }
+end
+
+-- Подсчёт элементов в таблице с проверкой
+local function tableCount(t)
+    assert(type(t) == "table", "Ожидалась таблица")
+    local count = 0
+    for _ in pairs(t) do count = count + 1 end
+    return count
+end
+
+-- Получение списка крафтов с обработкой ошибок
+local function getCraftables()
+    local ok, craftables = pcall(function()
+        return assert(me_interface.getCraftables(), "Нет данных о крафтах")
+    end)
+    if not ok then
+        return nil, craftables
+    end
+    return craftables
+end
+
+-- Главный экран с обработкой ошибок
+local function mainScreen()
+    clear()
+    
+    -- Заголовок
+    gpu.setBackground(colors.header)
+    gpu.fill(1, 1, w, 1, " ")
+    gpu.setForeground(colors.text)
+    gpu.set(math.floor(w/2) - 6, 1, "ME СИСТЕМА v1.1")
+
+    -- Информация о системе
+    gpu.setForeground(0xCCCCCC)
+    gpu.set(2, 3, string.format("Память: %d/%d KB", computer.freeMemory()/1024, computer.totalMemory()/1024))
+    
+    -- Информация о хранилище
+    local storage = getStorageInfo()
+    if storage.error then
+        gpu.setForeground(colors.error)
+        gpu.set(2, 5, storage.error)
+    else
+        gpu.setForeground(colors.storage)
+        gpu.set(2, 5, string.format("Ячейки: %d/%d", storage.usedCells, storage.totalCells))
+        gpu.set(2, 6, string.format("Предметы: %d (%d типов)", storage.totalItems, storage.uniqueItems))
+        
+        -- Прогресс-бар заполненности
+        local barWidth = 20
+        local fillWidth = math.floor((storage.usedCells / math.max(storage.totalCells, 1)) * barWidth)
+        gpu.setForeground(colors.storage)
+        gpu.set(2, 7, "[")
+        gpu.set(2 + barWidth + 1, 7, "]")
+        gpu.setBackground(0x333333)
+        gpu.fill(3, 7, barWidth, 1, " ")
+        gpu.setBackground(colors.storage)
+        if fillWidth > 0 then
+            gpu.fill(3, 7, fillWidth, 1, " ")
+        end
+    end
+
+    -- Разделитель
+    gpu.setForeground(0x555555)
+    gpu.fill(1, 9, w, 1, "─")
+
+    -- Список крафтов
+    gpu.setForeground(colors.craftable)
+    gpu.set(2, 11, "ДОСТУПНЫЕ КРАФТЫ:")
+    
+    local craftables, err = getCraftables()
+    local buttons = {}
+    
+    if err then
+        gpu.setForeground(colors.error)
+        gpu.set(2, 13, err)
+    else
+        local yPos = 13
+        for i = 1, math.min(8, #craftables) do
+            local ok, item = pcall(function() 
+                return assert(craftables[i].getItemStack(), "Не удалось получить предмет")
+            end)
+            if ok and item then
+                gpu.setForeground(colors.text)
+                gpu.set(2, yPos, string.format("%2d.", i))
+                gpu.setForeground(colors.craftable)
+                gpu.set(6, yPos, item.label or "Неизвестный предмет")
+                buttons[i] = drawButton(w - 12, yPos, 10, "Подробнее", colors.detail)
+                yPos = yPos + 1
+            end
+        end
+    end
+
+    -- Кнопки управления
+    gpu.setForeground(0x555555)
+    gpu.fill(1, h-3, w, 1, "─")
+    
+    local itemsBtn = drawButton(2, h-2, 15, "Список предметов", colors.button)
+    local craftBtn = drawButton(w-17, h-2, 15, "Крафт предмета", colors.button)
+
+    return {
+        buttons = buttons,
+        itemsBtn = itemsBtn,
+        craftBtn = craftBtn,
+        craftables = craftables
+    }
+end
+
+-- Экран деталей крафта
+local function craftDetailScreen(craftable)
+    clear()
+    
+    local ok, item = pcall(function() 
+        return assert(craftable.getItemStack(), "Не удалось получить информацию о предмете")
+    end)
+    if not ok then
+        gpu.setForeground(colors.error)
+        gpu.set(2, 2, item)
+        drawButton(2, h-2, 8, "Назад", colors.button)
+        return
+    end
+
+    -- Заголовок
+    gpu.setBackground(colors.header)
+    gpu.fill(1, 1, w, 1, " ")
+    gpu.setForeground(colors.text)
+    gpu.set(math.floor(w/2) - math.floor(#item.label/2), 1, item.label)
+
+    -- Информация
+    gpu.setForeground(colors.detail)
+    gpu.set(2, 3, "ID: "..(item.name or "неизвестно"))
+    gpu.set(2, 4, "Модификатор: "..(item.damage or "0"))
+    
+    -- Кнопки крафта
+    local craft1 = drawButton(2, 6, 18, "Запустить крафт x1", colors.craftable)
+    local craft10 = drawButton(2, 8, 18, "Запустить крафт x10", colors.craftable)
+    local craft64 = drawButton(2, 10, 18, "Запустить крафт x64", colors.craftable)
+    
+    -- Кнопка назад
+    local backBtn = drawButton(2, h-2, 8, "Назад", colors.button)
+
+    return {
+        craft1 = craft1,
+        craft10 = craft10,
+        craft64 = craft64,
+        backBtn = backBtn,
+        item = item,
+        craftable = craftable
+    }
+end
+
+-- Основной цикл программы
+local function main()
+    local currentScreen = "main"
+    local screenData = {}
+
+    while true do
+        local ok, err = pcall(function()
+            if currentScreen == "main" then
+                screenData = mainScreen()
+            elseif currentScreen == "craft" then
+                screenData = craftDetailScreen(screenData.craftable)
+            elseif currentScreen == "items" then
+                screenData = itemsScreen()
+            end
+        end)
+        
+        if not ok then
+            clear()
+            gpu.setForeground(colors.error)
+            gpu.set(2, 2, "Критическая ошибка:")
+            gpu.set(2, 3, err)
+            gpu.set(2, 5, "Перезапустите программу")
+            os.sleep(5)
+            return
+        end
+
+        -- Обработка событий
+        local e, _, x, y = event.pull("touch")
+        
+        if currentScreen == "main" then
+            -- Проверка кнопок крафтов
+            for i, btn in pairs(screenData.buttons) do
+                if x >= btn.x and x <= btn.x + btn.width and y == btn.y then
+                    if screenData.craftables and screenData.craftables[i] then
+                        screenData.craftable = screenData.craftables[i]
+                        currentScreen = "craft"
+                        break
+                    end
+                end
+            end
+            
+            -- Кнопка списка предметов
+            if screenData.itemsBtn and x >= screenData.itemsBtn.x and x <= screenData.itemsBtn.x + screenData.itemsBtn.width and y == screenData.itemsBtn.y then
+                currentScreen = "items"
+            end
+            
+        elseif currentScreen == "craft" then
+            -- Обработка кнопок крафта
+            if screenData.backBtn and x >= screenData.backBtn.x and x <= screenData.backBtn.x + screenData.backBtn.width and y == screenData.backBtn.y then
+                currentScreen = "main"
+            elseif screenData.craft1 and x >= screenData.craft1.x and x <= screenData.craft1.x + screenData.craft1.width and y == screenData.craft1.y then
+                pcall(function() assert(screenData.craftable.request(1), "Ошибка запуска крафта") end)
+            elseif screenData.craft10 and x >= screenData.craft10.x and x <= screenData.craft10.x + screenData.craft10.width and y == screenData.craft10.y then
+                pcall(function() assert(screenData.craftable.request(10), "Ошибка запуска крафта") end)
+            elseif screenData.craft64 and x >= screenData.craft64.x and x <= screenData.craft64.x + screenData.craft64.width and y == screenData.craft64.y then
+                pcall(function() assert(screenData.craftable.request(64), "Ошибка запуска крафта") end)
+            end
+            
+        elseif currentScreen == "items" then
+            -- Кнопка назад
+            if screenData.backBtn and x >= screenData.backBtn.x and x <= screenData.backBtn.x + screenData.backBtn.width and y == screenData.backBtn.y then
+                currentScreen = "main"
+            end
+        end
+    end
+end
+
+-- Запуск программы с обработкой ошибок
+local ok, err = pcall(main)
+if not ok then
+    gpu.setForeground(colors.error)
+    gpu.set(1, 1, "Фатальная ошибка:")
+    gpu.set(1, 2, err)
+end
